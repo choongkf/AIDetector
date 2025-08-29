@@ -1,18 +1,25 @@
+"""
+AI Text Detection Web App
+
+This Streamlit application allows users to detect AI-generated text using trained transformer models.
+It provides both quick detection and detailed analysis reports showing how predictions are made.
+"""
+
 import streamlit as st
 import torch
 import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import models
 from transformers import (
     RobertaTokenizer, RobertaForSequenceClassification,
     DistilBertTokenizer, DistilBertForSequenceClassification
 )
-import json
-import time
-from pathlib import Path
-import warnings
-warnings.filterwarnings('ignore')
+
+# Import prediction report functionality
+from prediction_report import show_prediction_report_page
 
 # Page configuration
 st.set_page_config(
@@ -22,7 +29,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS for home page
 st.markdown("""
 <style>
 .main-header {
@@ -40,15 +47,15 @@ st.markdown("""
     border-radius: 10px;
     padding: 1rem;
     margin: 1rem 0;
-    background-color: #f9f9f9;
+    background: linear-gradient(135deg, #32CD32 0%, #006400 100%);
 }
 
 .prediction-box {
     border: 3px solid;
     border-radius: 15px;
     padding: 2rem;
-    margin: 1rem 0;
     text-align: center;
+    margin: 2rem 0;
     font-size: 1.5rem;
     font-weight: bold;
 }
@@ -62,340 +69,230 @@ st.markdown("""
 .human-prediction {
     border-color: #4ECDC4;
     background-color: #E5F9F7;
-    color: #007A6A;
+    color: #008B8B;
 }
 
-.metric-card {
-    background-color: #f0f2f6;
+.feature-metric {
+    background-color: #E5F9F7;
     padding: 1rem;
     border-radius: 10px;
-    border-left: 5px solid #4ECDC4;
+    text-align: center;
+    margin: 0.5rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
+
+# Device setup
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Model loading functions
+def get_model_path(model_name):
+    """Get the correct model path, checking multiple possible locations"""
+    possible_paths = [
+        Path(f"models/{model_name}"),  # If running from project root
+        Path(f"../models/{model_name}"),  # If running from streamlit_app folder
+        Path(f"../AIDetector/models/{model_name}"),  # If running from parent directory
+        Path(__file__).parent.parent / "models" / model_name,  # Relative to this file
+    ]
+    
+    for path in possible_paths:
+        if path.exists():
+            return path
+    
+    return None
+
+def debug_model_paths():
+    """Debug function to show model search paths"""
+    st.write("🔍 **Model Path Debug Information:**")
+    
+    current_dir = Path.cwd()
+    script_dir = Path(__file__).parent
+    
+    st.write(f"- **Current working directory:** `{current_dir}`")
+    st.write(f"- **Script directory:** `{script_dir}`")
+    
+    model_names = ["roberta_ai_detector", "distilbert_ai_detector"]
+    
+    for model_name in model_names:
+        st.write(f"\n**Looking for {model_name}:**")
+        
+        possible_paths = [
+            Path(f"models/{model_name}"),
+            Path(f"../models/{model_name}"),
+            Path(f"../AIDetector/models/{model_name}"),
+            Path(__file__).parent.parent / "models" / model_name,
+        ]
+        
+        for i, path in enumerate(possible_paths, 1):
+            exists = "✅" if path.exists() else "❌"
+            st.write(f"  {i}. {exists} `{path.resolve()}`")
+
 @st.cache_resource
-def load_models():
-    """Load the trained models"""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    models = {}
-    
-    # Try to load RoBERTa model
+def load_roberta_model():
+    """Load RoBERTa model"""
     try:
-        roberta_path = Path('../models/roberta_ai_detector')
-        if roberta_path.exists():
-            roberta_model = RobertaForSequenceClassification.from_pretrained(
-                str(roberta_path), 
-                num_labels=2
-            )
-            roberta_tokenizer = RobertaTokenizer.from_pretrained(str(roberta_path))
-            roberta_model.to(device)
-            roberta_model.eval()
-            models['RoBERTa'] = {
-                'model': roberta_model,
-                'tokenizer': roberta_tokenizer,
-                'loaded': True
-            }
+        model_path = get_model_path("roberta_ai_detector")
+        
+        if model_path and model_path.exists():
+            tokenizer = RobertaTokenizer.from_pretrained(str(model_path))
+            model = RobertaForSequenceClassification.from_pretrained(str(model_path))
+            model.to(device)
+            model.eval()
+            st.success(f"✅ RoBERTa model loaded from: {model_path}")
+            return tokenizer, model, True
         else:
-            models['RoBERTa'] = {'loaded': False}
+            checked_paths = [
+                "models/roberta_ai_detector",
+                "../models/roberta_ai_detector", 
+                "../AIDetector/models/roberta_ai_detector"
+            ]
+            st.warning(f"❌ RoBERTa model not found. Checked paths: {checked_paths}")
+            return None, None, False
     except Exception as e:
-        models['RoBERTa'] = {'loaded': False, 'error': str(e)}
-    
-    # Try to load DistilBERT model
+        st.error(f"❌ Error loading RoBERTa model: {str(e)}")
+        return None, None, False
+
+@st.cache_resource
+def load_distilbert_model():
+    """Load DistilBERT model"""
     try:
-        distilbert_path = Path('../models/distilbert_ai_detector')
-        if distilbert_path.exists():
-            distilbert_model = DistilBertForSequenceClassification.from_pretrained(
-                str(distilbert_path), 
-                num_labels=2
-            )
-            distilbert_tokenizer = DistilBertTokenizer.from_pretrained(str(distilbert_path))
-            distilbert_model.to(device)
-            distilbert_model.eval()
-            models['DistilBERT'] = {
-                'model': distilbert_model,
-                'tokenizer': distilbert_tokenizer,
-                'loaded': True
-            }
+        model_path = get_model_path("distilbert_ai_detector")
+        
+        if model_path and model_path.exists():
+            tokenizer = DistilBertTokenizer.from_pretrained(str(model_path))
+            model = DistilBertForSequenceClassification.from_pretrained(str(model_path))
+            model.to(device)
+            model.eval()
+            st.success(f"✅ DistilBERT model loaded from: {model_path}")
+            return tokenizer, model, True
         else:
-            models['DistilBERT'] = {'loaded': False}
+            checked_paths = [
+                "models/distilbert_ai_detector",
+                "../models/distilbert_ai_detector", 
+                "../AIDetector/models/distilbert_ai_detector"
+            ]
+            st.warning(f"❌ DistilBERT model not found. Checked paths: {checked_paths}")
+            return None, None, False
     except Exception as e:
-        models['DistilBERT'] = {'loaded': False, 'error': str(e)}
-    
-    return models, device
+        st.error(f"❌ Error loading DistilBERT model: {str(e)}")
+        return None, None, False
 
-@st.cache_data
-def load_results():
-    """Load model comparison results"""
-    results = {}
+def predict_text(text, model, tokenizer):
+    """Make prediction on text"""
+    if len(text.strip()) < 10:
+        return None, "Text too short for reliable prediction"
     
-    # Load RoBERTa results
     try:
-        with open('../models/roberta_results.json', 'r') as f:
-            results['RoBERTa'] = json.load(f)
-    except FileNotFoundError:
-        results['RoBERTa'] = None
-    
-    # Load DistilBERT results
-    try:
-        with open('../models/distilbert_results.json', 'r') as f:
-            results['DistilBERT'] = json.load(f)
-    except FileNotFoundError:
-        results['DistilBERT'] = None
-    
-    # Load comparison
-    try:
-        with open('../models/model_comparison.json', 'r') as f:
-            results['comparison'] = json.load(f)
-    except FileNotFoundError:
-        results['comparison'] = None
-    
-    return results
+        # Tokenize
+        encoding = tokenizer(
+            text,
+            truncation=True,
+            padding='max_length',
+            max_length=512,
+            return_tensors='pt'
+        )
+        
+        input_ids = encoding['input_ids'].to(device)
+        attention_mask = encoding['attention_mask'].to(device)
+        
+        # Get prediction
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            confidence = torch.max(predictions, dim=1)[0].item()
+            predicted_class = torch.argmax(predictions, dim=1).item()
+        
+        return {
+            'prediction': predicted_class,
+            'confidence': confidence,
+            'human_prob': float(predictions[0][0]),
+            'ai_prob': float(predictions[0][1])
+        }, None
+        
+    except Exception as e:
+        return None, f"Prediction error: {str(e)}"
 
-def predict_text(text, model_name, models, device, max_length=512):
-    """Predict if text is AI-generated or human-written"""
-    if not models[model_name]['loaded']:
-        return None, None, None
+def show_home_page(models):
+    """Display the main detection interface"""
     
-    model = models[model_name]['model']
-    tokenizer = models[model_name]['tokenizer']
-    
-    # Tokenize
-    encoding = tokenizer(
-        text,
-        truncation=True,
-        padding='max_length',
-        max_length=max_length,
-        return_tensors='pt'
-    )
-    
-    # Move to device
-    input_ids = encoding['input_ids'].to(device)
-    attention_mask = encoding['attention_mask'].to(device)
-    
-    # Predict
-    start_time = time.time()
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        prediction = torch.argmax(probabilities, dim=-1)
-    end_time = time.time()
-    
-    inference_time = (end_time - start_time) * 1000  # Convert to milliseconds
-    
-    return prediction.item(), probabilities[0].cpu().numpy(), inference_time
-
-def main():
-    # Load models and results
-    models, device = load_models()
-    results = load_results()
-    
-    # Header
     st.markdown('<h1 class="main-header">🤖 AI Text Detector</h1>', unsafe_allow_html=True)
+    
+    # Introduction
     st.markdown("""
-    <div style="text-align: center; font-size: 1.2rem; color: #666; margin-bottom: 2rem;">
-    Detect whether text is written by AI or humans using state-of-the-art transformer models
+    <div style="text-align: center; font-size: 1.2rem; margin-bottom: 2rem;">
+    Detect if text was written by AI or humans using state-of-the-art transformer models
     </div>
     """, unsafe_allow_html=True)
     
-    # Sidebar
-    st.sidebar.header("🔧 Model Settings")
-    
-    # Model selection
-    available_models = [name for name in models.keys() if models[name]['loaded']]
-    
-    if not available_models:
-        st.error("❌ No trained models found! Please train the models first using the Jupyter notebooks.")
-        st.stop()
-    
-    selected_model = st.sidebar.selectbox(
-        "Choose Model:",
-        available_models,
-        help="Select which model to use for prediction"
-    )
-    
-    # Model info
-    st.sidebar.markdown("### 📊 Model Information")
-    if results.get(selected_model):
-        result = results[selected_model]
-        st.sidebar.metric("Accuracy", f"{result['test_accuracy']:.1%}")
-        st.sidebar.metric("F1-Score", f"{result['test_f1']:.3f}")
-        if 'inference_time_ms' in result:
-            st.sidebar.metric("Speed", f"{result['inference_time_ms']:.1f}ms")
-    
-    # Main content
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.header("📝 Text Input")
-        
-        # Text input methods
-        input_method = st.radio(
-            "Choose input method:",
-            ["Type/Paste Text", "Upload File", "Use Sample Text"],
-            horizontal=True
-        )
-        
-        text_to_analyze = ""
-        
-        if input_method == "Type/Paste Text":
-            text_to_analyze = st.text_area(
-                "Enter text to analyze:",
-                height=200,
-                placeholder="Paste your text here to check if it's AI-generated or human-written..."
-            )
-        
-        elif input_method == "Upload File":
-            uploaded_file = st.file_uploader(
-                "Upload a text file",
-                type=['txt'],
-                help="Upload a .txt file to analyze"
-            )
-            if uploaded_file is not None:
-                text_to_analyze = str(uploaded_file.read(), "utf-8")
-                st.text_area("Uploaded text:", text_to_analyze, height=150, disabled=True)
-        
-        elif input_method == "Use Sample Text":
-            sample_type = st.selectbox(
-                "Choose sample type:",
-                ["AI-Generated Sample", "Human-Written Sample"]
-            )
-            
-            if sample_type == "AI-Generated Sample":
-                text_to_analyze = """Car-free cities have become a subject of increasing interest and debate in recent years, as urban areas around the world grapple with the challenges of congestion, pollution, and limited resources. The concept of a car-free city involves creating urban environments where private automobiles are either significantly restricted or completely banned, with a focus on alternative transportation methods and sustainable urban planning. This essay explores the benefits, challenges, and potential solutions associated with the idea of car-free cities."""
-            else:
-                text_to_analyze = """In conclusion Venus has its ups and downs but I do believe that it is worth studing despite the dangers that come with it . Also i do believe that we should send spacesrafts up there what are mre durable then the other ones that was sent there a long time ago because of the new tecnology that we have . I think that its possable that we could come up with more samples of different items ."""
-            
-            st.text_area("Sample text:", text_to_analyze, height=150, disabled=True)
-    
+    # Navigation buttons
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.header("🎯 Prediction")
-        
-        if st.button("🔍 Analyze Text", type="primary", use_container_width=True):
-            if not text_to_analyze.strip():
-                st.error("Please enter some text to analyze!")
-            else:
-                with st.spinner(f"Analyzing with {selected_model}..."):
-                    prediction, probabilities, inference_time = predict_text(
-                        text_to_analyze, selected_model, models, device
-                    )
-                
-                if prediction is not None:
-                    # Display prediction
-                    if prediction == 1:
-                        st.markdown(
-                            '<div class="prediction-box ai-prediction">🤖 AI Generated</div>',
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            '<div class="prediction-box human-prediction">👤 Human Written</div>',
-                            unsafe_allow_html=True
-                        )
-                    
-                    # Confidence scores
-                    st.subheader("📊 Confidence Scores")
-                    
-                    human_conf = probabilities[0] * 100
-                    ai_conf = probabilities[1] * 100
-                    
-                    # Progress bars
-                    st.metric("Human", f"{human_conf:.1f}%")
-                    st.progress(human_conf / 100)
-                    
-                    st.metric("AI Generated", f"{ai_conf:.1f}%")
-                    st.progress(ai_conf / 100)
-                    
-                    # Additional info
-                    st.subheader("ℹ️ Analysis Info")
-                    st.info(f"""
-                    **Model Used:** {selected_model}
-                    **Inference Time:** {inference_time:.1f}ms
-                    **Text Length:** {len(text_to_analyze)} characters
-                    **Word Count:** {len(text_to_analyze.split())} words
-                    """)
-                else:
-                    st.error("Error during prediction. Please try again.")
+        if st.button("📊 Detailed Analysis Report", type="secondary", use_container_width=True):
+            st.session_state.page = "report"
+            st.rerun()
     
-    # Text statistics
-    if text_to_analyze:
-        st.header("📈 Text Statistics")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Characters", len(text_to_analyze))
-        with col2:
-            st.metric("Words", len(text_to_analyze.split()))
-        with col3:
-            st.metric("Sentences", len([s for s in text_to_analyze.split('.') if s.strip()]))
-        with col4:
-            avg_word_length = np.mean([len(word.strip('.,!?;:')) for word in text_to_analyze.split()])
-            st.metric("Avg Word Length", f"{avg_word_length:.1f}")
+    st.divider()
     
-    # Model Comparison
-    st.header("🏆 Model Comparison")
-    
-    if results.get('comparison'):
-        comparison = results['comparison']
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📊 Performance Metrics")
-            if 'performance_comparison' in comparison:
-                perf_data = comparison['performance_comparison']
-                df = pd.DataFrame(perf_data)
-                df = df.set_index('Model')
-                st.dataframe(df.round(4))
-        
-        with col2:
-            st.subheader("💡 Recommendations")
-            if 'recommendations' in comparison:
-                rec = comparison['recommendations']
-                st.info(f"**Best Accuracy:** {rec.get('best_accuracy', 'N/A')}")
-                st.info(f"**Best Speed:** {rec.get('best_speed', 'N/A')}")
-                st.success(f"**Recommended for Production:** {rec.get('recommended_for_production', 'N/A')}")
-    
-    else:
-        st.info("Model comparison data not available. Run the comparison notebook to see detailed metrics.")
-    
-    # Model Status
-    st.header("🔧 Model Status")
+    # Model status
+    st.header("🧠 Model Status")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("RoBERTa Model")
-        if models['RoBERTa']['loaded']:
-            st.success("✅ Loaded successfully")
-            if results.get('RoBERTa'):
-                st.write(f"**Accuracy:** {results['RoBERTa']['test_accuracy']:.1%}")
-                st.write(f"**Parameters:** {results['RoBERTa'].get('model_parameters', 'N/A'):,}")
-        else:
-            st.error("❌ Not loaded")
-            st.write("Train the RoBERTa model using notebook 02")
+        st.markdown("""
+        <div class="model-card">
+        <h3>🔴 RoBERTa Base</h3>
+        <p><strong>Parameters:</strong> 125M</p>
+        <p><strong>Training:</strong> Optimized for accuracy</p>
+        <p><strong>Status:</strong> {}</p>
+        </div>
+        """.format("✅ Loaded" if models['RoBERTa']['loaded'] else "❌ Not Available"), 
+        unsafe_allow_html=True)
     
     with col2:
-        st.subheader("DistilBERT Model")
-        if models['DistilBERT']['loaded']:
-            st.success("✅ Loaded successfully")
-            if results.get('DistilBERT'):
-                st.write(f"**Accuracy:** {results['DistilBERT']['test_accuracy']:.1%}")
-                st.write(f"**Parameters:** {results['DistilBERT'].get('model_parameters', 'N/A'):,}")
-        else:
-            st.error("❌ Not loaded")
-            st.write("Train the DistilBERT model using notebook 03")
+        st.markdown("""
+        <div class="model-card">
+        <h3>🔵 DistilBERT Base</h3>
+        <p><strong>Parameters:</strong> 66M</p>
+        <p><strong>Training:</strong> Optimized for speed</p>
+        <p><strong>Status:</strong> {}</p>
+        </div>
+        """.format("✅ Loaded" if models['DistilBERT']['loaded'] else "❌ Not Available"), 
+        unsafe_allow_html=True)
     
-    # Footer
-    st.markdown("---")
-    st.markdown("""
-    <div style="text-align: center; color: #666; padding: 2rem;">
-    🤖 AI Text Detector | Built with Streamlit, PyTorch & Transformers<br>
-    Models: RoBERTa-base & DistilBERT-base | Dataset: 23,276 samples (balanced)
-    </div>
-    """, unsafe_allow_html=True)
+    st.divider()
+    
+def main():
+    """Main application function"""
+    
+    # Initialize session state
+    if 'page' not in st.session_state:
+        st.session_state.page = "home"
+    
+    # Load models
+    roberta_tokenizer, roberta_model, roberta_loaded = load_roberta_model()
+    distilbert_tokenizer, distilbert_model, distilbert_loaded = load_distilbert_model()
+    
+    # Store models in a dictionary
+    models = {
+        'RoBERTa': {
+            'tokenizer': roberta_tokenizer,
+            'model': roberta_model,
+            'loaded': roberta_loaded
+        },
+        'DistilBERT': {
+            'tokenizer': distilbert_tokenizer,
+            'model': distilbert_model,
+            'loaded': distilbert_loaded
+        }
+    }
+    
+    # Page navigation
+    if st.session_state.page == "home":
+        show_home_page(models)
+    elif st.session_state.page == "report":
+        show_prediction_report_page(models, device)
 
 if __name__ == "__main__":
     main()
